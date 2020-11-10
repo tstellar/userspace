@@ -1,0 +1,47 @@
+From 8c5b0f6e108c426ce4c89a7127208fd96c4e5b3e Mon Sep 17 00:00:00 2001
+From: Tom Stellard <tstellar@redhat.com>
+Date: Fri, 24 Jul 2020 05:22:14 +0000
+Subject: [PATCH] Fix build of jitterentropy-base.c with clang v2
+
+Clang has a slightly different pragma to disable optimizations.
+
+v2: Make sure jitterentropy.h is included when buiding with clang.
+---
+ random/jitterentropy-base.c | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/random/jitterentropy-base.c b/random/jitterentropy-base.c
+index 32fdea46..cd5af22b 100644
+--- a/random/jitterentropy-base.c
++++ b/random/jitterentropy-base.c
+@@ -50,9 +50,16 @@
+  */
+ 
+ #undef _FORTIFY_SOURCE
++#ifdef __clang__
++#pragma clang optimize off
++
++/* clang does not undefine the __OPTIMIZE__ macro after using the
++ * clang optimize off pragma, so the same __OPTIMIZE__ check below that
++ * is used for gcc won't work.
++ */
++#else
+ #pragma GCC optimize ("O0")
+ 
+-#include "jitterentropy.h"
+ 
+ #ifndef CONFIG_CRYPTO_CPU_JITTERENTROPY_STAT
+  /* only check optimization in a compilation for real work */
+@@ -60,6 +67,9 @@
+   #error "The CPU Jitter random number generator must not be compiled with optimizations. See documentation. Use the compiler switch -O0 for compiling jitterentropy-base.c."
+  #endif
+ #endif
++#endif
++
++#include "jitterentropy.h"
+ 
+ #define MAJVERSION 2 /* API / ABI incompatible changes, functional changes that
+ 		      * require consumer to be updated (as long as this number
+-- 
+2.26.2
+
