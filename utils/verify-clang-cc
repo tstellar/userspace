@@ -1,0 +1,96 @@
+#!/bin/bash
+
+searchdir=$1
+debuginfo_suffix=$2
+
+if [ -z "$searchdir" ]; then
+    searchdir=$RPM_BUILD_ROOT
+fi
+
+if [ -z "$debuginfo_suffix" ]; then
+    debuginfo_suffix="-$RPM_PACKAGE_VERSION-$RPM_PACKAGE_RELEASE.$RPM_ARCH.debug"
+fi
+
+# Ignore the .dwz directory, because it contains compressed debuginfo that
+# do not contain .comment section and all the uncompressed debuginfo is
+# already being searched.
+for f in `find "$searchdir" -iname .dwz -prune -o -type f -print`; do
+    if ! readelf -h $f &> /dev/null; then
+        # Not an ELF file
+        continue
+    fi
+
+    echo "--- COMPILER CHECK: $f"
+
+    # Special cases
+    # libpython3.so is a shared object that does not contain any object files,
+    # so this script is unable to detect if it was built with clang.
+    if basename $f | grep '^libpython3.so'; then
+        echo "Ignoring special case $f"
+        continue
+    fi
+
+    # Check for a .debug_info section
+    llvm-readelf -S $f | grep -q '.debug_info[[:space:]]'
+    if [ $? -ne 0 ]; then
+        # No .debug_info section found.  This binary may have been stripped.
+        # check to see if we can find any debuginfo.
+        debug_basename=`basename $f`
+
+        # cockpit generates debuginfo files on its own, so it does not have the standard file
+        # names like other packages, so we need to make sure we search for it.
+        debug_info=`find $searchdir -iname $debug_basename$debuginfo_suffix -o -iname $debug_basename.debug`
+        if [ $? -eq 0 -a -n "$debug_info" ]; then
+          f=$debug_info
+        fi
+    fi
+
+    # Skip binaries from languages besides C/C++.
+    # We want to be really conservative here.
+    num_lang_attributes=`llvm-dwarfdump --recurse-depth=0 $f | grep DW_AT_language | wc -l`
+
+    if [ $num_lang_attributes -gt 0 ]; then
+
+        can_skip=0
+        # 0xaf33 is Guile
+        for lang in DW_LANG_Fortran95 DW_LANG_Rust "DW_AT_language[[:space:]]\+(0xaf33)"; do
+            num_langs=`llvm-dwarfdump --recurse-depth=0 $f | grep $lang | wc -l`
+            if [ "$num_langs" -eq "$num_lang_attributes" ]; then
+                can_skip=1
+                echo "$f was compled from $lang, so clang was not used."
+                break
+            fi
+        done
+
+        if [ "$can_skip" -eq 1 ]; then
+            continue
+        fi
+    fi
+
+    # Check debuginfo to see if a GNU compiler was used
+    dwarfdump -P $f | grep '[0-9]\+: GNU' | \
+    while read LINE; do
+        echo $LINE | grep '\-fbuilding-libgcc'
+        # Ignore compile units that are part of libgcc:
+        if [ $? -ne 0 ]; then
+            echo "$f was built with gcc"
+            exit 1
+        fi
+    done
+
+    # If .comment section exists check to make sure it references clang.
+    if llvm-readelf -S $f | grep -q .comment; then
+        if ! llvm-readelf --string-dump .comment $f | grep clang; then
+            echo "$f was not built with clang"
+            exit 1
+        fi
+    else
+        # There is no comment section, so check debug info.
+        # gnutls needs this.
+        if ! dwarfdump -P $f | grep '[0-9]\+: clang'; then
+            echo "$f was not built with clang"
+            exit 1
+        fi
+    fi
+    echo "$f built with clang"
+done
